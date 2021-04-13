@@ -18,7 +18,7 @@ contract MultiPricer {
     struct Price {
         uint256 price;
         uint256 timestamp;
-        address source; // Source of the price data
+        Pricer source; // Source of the price data
     }
     /// @dev Struct that stores info for the Pricer
     /// Weight can be used to determine the "trust" level
@@ -31,6 +31,8 @@ contract MultiPricer {
     /// @dev Permissioned addresses to pull price data from
     /// (key = asset) -> (value = pricers)
     mapping(address => Pricer[]) internal pricers;
+    /// @dev Pricer to price data
+    mapping(address => Price) internal prices;
     /// @dev Permissioned addresses to allow to call functions
     mapping(address => bool) internal bots;
     /// @dev Tolerable weight deviation
@@ -131,6 +133,9 @@ contract MultiPricer {
         require(_newAdmin != address(0), "MultiPricer: Zero address");
         admin = _newAdmin;
     }
+    function prepareData(address _asset) external onlyBot {
+
+    }
     function pushData(address _asset) external onlyBot {
         
         
@@ -148,15 +153,43 @@ contract MultiPricer {
         internal
         returns(uint256 weightedPrice)
     {
+        uint256 totalPricers = pricers[_asset].length;
+
         // Check if there is even a pricer available
-        
+        require(totalPricers > 0, "MultiPricer: Pricers do not exist!");
+
+        // Continue preparing variables
+        uint16 totalWeight;
+        Pricer[] memory assetPricers = pricers[_asset];
+        Price[] memory assetPrices = new Price[](totalPricers);
 
         // Check if the pricer was called recently, otherwise remove it from the calculation
-        
+        for(uint256 i; i < assetPricers.length; i++) {
+            if(
+                prices[assetPricers[i].source].timestamp != 0 && 
+                prices[assetPricers[i].source].timestamp >= block.timestamp - 15 minutes
+            ) {
+                assetPrices[assetPrices.length] = (prices[assetPricers[i].source]);
+                totalWeight.add(assetPricers[i].weight);
+            } 
+        }
+
+        // Verify weights
+        if(!_weightDeviationToleranceCheck(totalWeight)) {
+            _reweighPricer(assetPricers);
+        }
+
         // Multiply the weights appropriately
+        for(uint256 i; i < assetPrices.length; i++) {
+            if(assetPrices[i].price != 0) {
+                weightedPrice.add(assetPrices[i].price.mul(assetPrices[i].source.weight));
+            } else {
+                break;
+            }
+        }
     }
     function _reweighPricer(
-        Pricer[] storage _pricersToReweigh
+        Pricer[] memory _pricersToReweigh
     )
         internal
         returns(Pricer[] memory pricers)
@@ -165,15 +198,16 @@ contract MultiPricer {
     }
     /**
     * @notice Verify the weights did not deviate too far or is out of bounds
-    * @param _totalWeightValues total value of the weight 
+    * @param _totalWeightValues total value of the weight
+    * @return true if the weight values didn't exceed the tolerance
     */
     function _weightDeviationToleranceCheck(
         uint16 _totalWeightValues
     )
         internal
         view
+        returns(bool)
     {
-        require(10000 - _totalWeightValues <= tolerableWeightDeviation, "MultiPricer: Intolerable weight deviation");
-        require(_totalWeightValues <= 10000, "MultiPricer: Illegal total weight value");
+        return (10000 - _totalWeightValues <= tolerableWeightDeviation) && (_totalWeightValues <= 10000);
     }
 }
