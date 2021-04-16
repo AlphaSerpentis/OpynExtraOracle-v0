@@ -1,17 +1,14 @@
-// SPDX-License-Identifier: UNLICENSED
-pragma solidity 0.6.10;
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.3;
 
 import {OracleInterface} from "./opyn/interfaces/OracleInterface.sol";
 import {OpynPricerInterface} from "./opyn/interfaces/OpynPricerInterface.sol";
-import {SafeMath} from "@openzeppelin/contracts/math/SafeMath.sol";
 
 /// @title Multi Pricer
 /// @author Amethyst C.
 /// @notice Multi Pricer pulls data from more than one source and uses a weighted average to calculate the expiration price
 /// @dev Pulls data from an oracle utilizing the OpynPricerInterface
 contract MultiPricer {
-    using SafeMath for uint256;
-    using SafeMath for uint16;
 
     /// @dev Struct that stores price of an asset and timestamp of when it was recorded
     /// Adapted from GammaProtocol/contracts/Oracle.sol
@@ -160,41 +157,67 @@ contract MultiPricer {
 
         // Continue preparing variables
         uint16 totalWeight;
+        bool missingPricer;
         Pricer[] memory assetPricers = pricers[_asset];
         Price[] memory assetPrices = new Price[](totalPricers);
 
         // Check if the pricer was called recently, otherwise remove it from the calculation
         for(uint256 i; i < assetPricers.length; i++) {
-            if(
-                prices[assetPricers[i].source].timestamp != 0 && 
-                prices[assetPricers[i].source].timestamp >= block.timestamp - 15 minutes
-            ) {
+            if(prices[assetPricers[i].source].timestamp >= block.timestamp - 15 minutes) {
+                missingPricer = true;
+                continue;
+            } else if(prices[assetPricers[i].source].timestamp != 0) {
                 assetPrices[assetPrices.length] = (prices[assetPricers[i].source]);
                 totalWeight.add(assetPricers[i].weight);
             } 
         }
 
-        // Verify weights
+        // Verify weights 
         if(!_weightDeviationToleranceCheck(totalWeight)) {
-            _reweighPricer(assetPricers);
+            if(missingPricer)
+                assetPricers = _reweighPricer(assetPricers, 0);
+            else
+                assetPricers = _reweighPricer(assetPricers, 1);
         }
 
-        // Multiply the weights appropriately
+        // Multiply to get the weighted average
         for(uint256 i; i < assetPrices.length; i++) {
             if(assetPrices[i].price != 0) {
                 weightedPrice.add(assetPrices[i].price.mul(assetPrices[i].source.weight));
-            } else {
-                break;
             }
         }
+
     }
     function _reweighPricer(
-        Pricer[] memory _pricersToReweigh
+        Pricer[] memory _pricersToReweigh,
+        uint256 _type
     )
         internal
-        returns(Pricer[] memory pricers)
+        pure
+        returns(Pricer[] memory)
     {
+        if(_type == 0) { // Reweigh due to missing pricer
+            uint16 currentWeightVal;
+            uint256 indexCount;
+            uint16[] memory indexOfValidPricers = new uint16[](_pricersToReweigh.length);
 
+            for(uint256 i; i < _pricersToReweigh.length; i++) {
+                if(_pricersToReweigh[i].source != address(0)) {
+                    indexOfValidPricers[indexCount++] = uint16(i);
+                    currentWeightVal.add(_pricersToReweigh[i].weight);
+                }
+            }
+
+            for(uint16 i; i < indexOfValidPricers.length; i++) {
+                _pricersToReweigh[i].weight = uint16(_pricersToReweigh[i].weight.div(currentWeightVal));
+            }
+        } else if(_type == 1) { // Reweigh to equalize
+            for(uint256 i; i < _pricersToReweigh.length; i++) {
+                _pricersToReweigh[i].weight = uint16(_pricersToReweigh[i].weight.div(_pricersToReweigh.length));
+            }
+        }
+
+        return _pricersToReweigh;
     }
     /**
     * @notice Verify the weights did not deviate too far or is out of bounds
@@ -208,6 +231,7 @@ contract MultiPricer {
         view
         returns(bool)
     {
+        require(_totalWeightValues <= 10000, "MultiPricer: Out of bounds - manual intervention required!");
         return (10000 - _totalWeightValues <= tolerableWeightDeviation) && (_totalWeightValues <= 10000);
     }
 }
