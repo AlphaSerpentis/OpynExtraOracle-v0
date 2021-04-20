@@ -132,10 +132,13 @@ contract BetterOracle {
         require(assetPricers.length > 0, "MultiPricer: Pricers do not exist!");
     }
 
-    function pushData(address _asset) external onlyBot {
-        Pricer[] storage assetPricers = pricers[_asset];
+    function pushData(address _asset, uint256 _expiryTimestamp) external onlyBot {
+        require(pricers[_asset].length > 0, "MultiPricer: Pricers do not exist!");
+        uint256 _weightedPrice = _calculateWeightedAverage(_asset);
 
-        require(assetPricers.length > 0, "MultiPricer: Pricers do not exist!");
+        opynOracle.setExpiryPrice(_asset, _expiryTimestamp, _weightedPrice);
+
+        emit PushedData(_asset, _weightedPrice);
     }
 
     function _onlyBot() internal view {
@@ -167,11 +170,12 @@ contract BetterOracle {
         for (uint256 i; i < assetPricers.length; i++) {
             if (
                 prices[assetPricers[i].source].timestamp <=
-                block.timestamp - 15 minutes
+                block.timestamp - 15 minutes &&
+                !missingPricer
             ) {
                 missingPricer = true;
             } else if (prices[assetPricers[i].source].timestamp != 0) {
-                assetPrices[assetPrices.length] = prices[assetPricers[i].source];
+                assetPrices[i] = prices[assetPricers[i].source];
                 totalWeight += assetPricers[i].weight;
                 if(assetPricers[i].decimalsOfPrecision > maxDecimalsOfPrecision)
                     maxDecimalsOfPrecision = assetPricers[i].decimalsOfPrecision;
