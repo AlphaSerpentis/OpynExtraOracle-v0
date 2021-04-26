@@ -4,13 +4,11 @@ pragma solidity >=0.6.10 < 0.9.0;
 import {AggregatorInterface} from "../interfaces/AggregatorInterface.sol";
 import {OracleInterface} from "../interfaces/OracleInterface.sol";
 import {OpynPricerInterface} from "../interfaces/OpynPricerInterface.sol";
-import {SafeMath} from "@openzeppelin/contracts/math/SafeMath.sol";
 
 /**
  * @notice A Pricer contract for one asset as reported by Chainlink
  */
 contract ChainLinkPricer is OpynPricerInterface {
-    using SafeMath for uint256;
 
     /// @notice the opyn oracle address
     OracleInterface public oracle;

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.3;
+pragma solidity 0.8.4;
 
 import {OracleInterface} from "./opyn/interfaces/OracleInterface.sol";
 import {OpynPricerInterface} from "./opyn/interfaces/OpynPricerInterface.sol";
@@ -9,6 +9,12 @@ import {OpynPricerInterface} from "./opyn/interfaces/OpynPricerInterface.sol";
 /// @notice Better Oracle pulls data from more than one source and uses a weighted average to calculate the expiration price
 /// @dev Pulls data from pricers utilizing the OpynPricerInterface
 contract BetterOracle {
+    error ZeroAddress();
+    error Unauthorized_Bot();
+    error Unauthorized_Admin();
+    error PricerDoesNotExist();
+    error WeightOutOfBounds();
+
     /// @dev Struct that stores info for the Pricer
     /// Weight can be used to determine the "trust" level
     struct Pricer {
@@ -30,7 +36,9 @@ contract BetterOracle {
     mapping(address => Price) internal prices;
     /// @dev Permissioned addresses to allow to call functions
     mapping(address => bool) internal bots;
-    /// @dev Tolerable weight deviation
+    /// @dev Tolerable price deviation from the mean in % (measured w/ 2 decimals [100.xx])
+    uint16 private tolerablePriceDeviation;
+    /// @dev Tolerable weight deviation in % (measured w/ 2 decimals [100.xx])
     uint16 private tolerableWeightDeviation;
     /// @dev Opyn v2's oracle to submit price data to
     OracleInterface private opynOracle;
@@ -44,9 +52,11 @@ contract BetterOracle {
     event PushedData(address asset, uint256 price);
     event AdminChanged(address newAdmin);
 
-    constructor(address _admin, address _opynOracle) {
+    constructor(address _admin, address _opynOracle, uint16 _tolerablePriceDeviation, uint16 _tolerableWeightDeviation) {
         admin = _admin; // Make sure admin is a multi-sig wallet!
         opynOracle = OracleInterface(_opynOracle);
+        tolerablePriceDeviation = _tolerablePriceDeviation;
+        tolerableWeightDeviation = _tolerableWeightDeviation;
     }
 
     modifier onlyBot {
@@ -109,7 +119,8 @@ contract BetterOracle {
      * @param _newOracle new oracle's address for Opyn v2
      */
     function changeOpynOracle(address _newOracle) external onlyAdmin {
-        require(_newOracle != address(0), "MultiPricer: Zero address");
+        if(_newOracle == address(0))
+            revert ZeroAddress();
         opynOracle = OracleInterface(_newOracle);
     }
 
@@ -118,7 +129,8 @@ contract BetterOracle {
      * @param _newAdmin new admin's address
      */
     function changeAdmin(address _newAdmin) external onlyAdmin {
-        require(_newAdmin != address(0), "MultiPricer: Zero address");
+        if(_newAdmin == address(0))
+            revert ZeroAddress();
         admin = _newAdmin;
     }
 
@@ -129,12 +141,14 @@ contract BetterOracle {
     function prepareData(address _asset) external onlyBot {
         Pricer[] storage assetPricers = pricers[_asset];
 
-        require(assetPricers.length > 0, "MultiPricer: Pricers do not exist!");
+        if(assetPricers.length == 0)
+            revert PricerDoesNotExist();
     }
 
-    function pushData(address _asset, uint256 _expiryTimestamp) external onlyBot {
-        require(pricers[_asset].length > 0, "MultiPricer: Pricers do not exist!");
-        uint256 _weightedPrice = _calculateWeightedAverage(_asset);
+    function pushData(address _asset, uint256 _expiryTimestamp, bool _ignoreOutOfBounds) external onlyBot {
+        if(pricers[_asset].length == 0)
+            revert PricerDoesNotExist();
+        uint256 _weightedPrice = _calculateWeightedAverage(_asset, _ignoreOutOfBounds);
 
         opynOracle.setExpiryPrice(_asset, _expiryTimestamp, _weightedPrice);
 
@@ -142,14 +156,16 @@ contract BetterOracle {
     }
 
     function _onlyBot() internal view {
-        require(bots[msg.sender], "MultiPricer: Unauthorized (bot)");
+        if(!bots[msg.sender])
+            revert Unauthorized_Bot();
     }
 
     function _onlyAdmin() internal view {
-        require(msg.sender == admin, "MultiPricer: Unauthorized");
+        if(msg.sender != admin)
+            revert Unauthorized_Admin();
     }
 
-    function _calculateWeightedAverage(address _asset)
+    function _calculateWeightedAverage(address _asset, bool _ignoreOutOfBounds)
         internal
         view
         returns (uint256 weightedPrice)
@@ -157,7 +173,8 @@ contract BetterOracle {
         uint256 totalPricers = pricers[_asset].length;
 
         // Check if there is even a pricer available
-        require(totalPricers > 0, "MultiPricer: Pricers do not exist!");
+        if(totalPricers == 0)
+            revert PricerDoesNotExist();
 
         // Continue preparing variables
         uint256 maxDecimalsOfPrecision;
@@ -174,6 +191,7 @@ contract BetterOracle {
                 !missingPricer
             ) {
                 missingPricer = true;
+                continue;
             } else if (prices[assetPricers[i].source].timestamp != 0) {
                 assetPrices[i] = prices[assetPricers[i].source];
                 totalWeight += assetPricers[i].weight;
@@ -183,7 +201,12 @@ contract BetterOracle {
         }
 
         // Verify weights
-        if (!_weightDeviationToleranceCheck(totalWeight)) {
+        (bool _tolerated, bool _outOfBounds) = _weightDeviationToleranceCheck(totalWeight);
+
+        if(_outOfBounds && !_ignoreOutOfBounds)
+            revert WeightOutOfBounds();
+
+        if (_tolerated) {
             if (missingPricer)
                 assetPricers = _reweighPricer(assetPricers, 0);
             else
@@ -231,6 +254,30 @@ contract BetterOracle {
         return _pricersToReweigh;
     }
 
+    function _priceDeviationToleranceCheck(
+        Price[] memory _prices
+    ) internal view returns(Price[] memory) {
+        uint256 sum;
+        uint256 mean;
+
+        for(uint256 i; i < _prices.length; i++) {
+            sum += _normalize(_prices[i].price, _prices[i].source.decimalsOfPrecision, 18);
+        }
+
+        mean = sum/_prices.length;
+
+        for(uint256 i; i < _prices.length; i++) {
+            if(_prices[i].price == mean) // Prevent dividing by zero
+                continue;
+            int256 diff = int256(_prices[i].price - mean);
+            uint256 percent = 10e18 * uint256(_abs(diff)) / ((_prices[i].price + mean) / 2) * 10000 / 10e18;
+            if(percent > tolerablePriceDeviation) {
+                delete _prices[i];
+            }
+        }
+        return _prices;
+    }
+
     function _normalize(
         uint256 _valueToNormalize,
         uint256 _valueDecimal,
@@ -250,17 +297,27 @@ contract BetterOracle {
     /**
      * @notice Verify the weights did not deviate too far or is out of bounds
      * @param _totalWeightValues total value of the weight
-     * @return true if the weight values didn't exceed the tolerance
+     * @return safeDeviation is true if out of bounds is false and did not deviate too far from the tolerable weight deviation
+     * @return outOfBounds is true if it is above 10000 (100.00)
      */
     function _weightDeviationToleranceCheck(uint16 _totalWeightValues)
         internal
         view
-        returns (bool)
+        returns (bool safeDeviation, bool outOfBounds)
     {
-        require(
-            _totalWeightValues <= 10000,
-            "MultiPricer: Out of bounds - manual intervention required!"
-        );
-        return (10000 - _totalWeightValues <= tolerableWeightDeviation);
+        if(_totalWeightValues <= 10000) {
+            outOfBounds = true;
+        }
+
+        if(10000 - _totalWeightValues <= tolerableWeightDeviation) {
+            safeDeviation = true;
+        }
+    }
+
+    /**
+     * @notice Return an absolute value
+     */
+    function _abs(int256 _val) internal pure returns(int256) {
+        return _val >= 0 ? _val: -_val;
     }
 }

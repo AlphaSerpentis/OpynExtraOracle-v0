@@ -5,13 +5,11 @@ import {OracleInterface} from "../interfaces/OracleInterface.sol";
 import {OpynPricerInterface} from "../interfaces/OpynPricerInterface.sol";
 import {CTokenInterface} from "../interfaces/CTokenInterface.sol";
 import {ERC20Interface} from "../interfaces/ERC20Interface.sol";
-import {SafeMath} from "@openzeppelin/contracts/math/SafeMath.sol";
 
 /**
  * @notice A Pricer contract for a Compound cToken
  */
 contract CompoundPricer is OpynPricerInterface {
-    using SafeMath for uint256;
 
     /// @notice opyn oracle address
     OracleInterface public oracle;
@@ -73,6 +71,6 @@ contract CompoundPricer is OpynPricerInterface {
         uint256 underlyingDecimals = uint256(underlying.decimals());
         uint256 cTokenDecimals = uint256(cToken.decimals());
         uint256 exchangeRate = cToken.exchangeRateStored();
-        return exchangeRate.mul(_underlyingPrice).mul(10**(cTokenDecimals)).div(10**(underlyingDecimals.add(18)));
+        return exchangeRate*(_underlyingPrice)*(10**(cTokenDecimals))/(10**(underlyingDecimals+(18)));
     }
 }
