@@ -36,8 +36,6 @@ contract BetterOracle {
     mapping(address => Price) internal prices;
     /// @dev Permissioned addresses to allow to call functions
     mapping(address => bool) internal bots;
-    /// @dev Tolerable price deviation from the mean in % (measured w/ 2 decimals [100.xx])
-    uint16 private tolerablePriceDeviation;
     /// @dev Tolerable weight deviation in % (measured w/ 2 decimals [100.xx])
     uint16 private tolerableWeightDeviation;
     /// @dev Opyn v2's oracle to submit price data to
@@ -47,15 +45,15 @@ contract BetterOracle {
 
     event PricerAdded(address asset, address pricer, uint16 trust);
     event PricerRemoved(address asset, address pricer);
+    event PricerWeightChanged(address pricer, uint16 weight);
     event BotAdded(address bot);
     event BotRemoved(address bot);
     event PushedData(address asset, uint256 price);
     event AdminChanged(address newAdmin);
 
-    constructor(address _admin, address _opynOracle, uint16 _tolerablePriceDeviation, uint16 _tolerableWeightDeviation) {
+    constructor(address _admin, address _opynOracle, uint16 _tolerableWeightDeviation) {
         admin = _admin; // Make sure admin is a multi-sig wallet!
         opynOracle = OracleInterface(_opynOracle);
-        tolerablePriceDeviation = _tolerablePriceDeviation;
         tolerableWeightDeviation = _tolerableWeightDeviation;
     }
 
@@ -94,6 +92,10 @@ contract BetterOracle {
     function removePricer(address _asset, address _pricer) external onlyAdmin {
         delete pricers[_asset];
         emit PricerRemoved(_asset, _pricer);
+    }
+
+    function changePricerWeight(address _asset, uint16 _newWeight) external onlyAdmin {
+
     }
 
     /**
@@ -199,7 +201,6 @@ contract BetterOracle {
                     maxDecimalsOfPrecision = assetPricers[i].decimalsOfPrecision;
             }
         }
-
         // Verify weights
         (bool _tolerated, bool _outOfBounds) = _weightDeviationToleranceCheck(totalWeight);
 
@@ -252,30 +253,6 @@ contract BetterOracle {
         }
 
         return _pricersToReweigh;
-    }
-
-    function _priceDeviationToleranceCheck(
-        Price[] memory _prices
-    ) internal view returns(Price[] memory) {
-        uint256 sum;
-        uint256 mean;
-
-        for(uint256 i; i < _prices.length; i++) {
-            sum += _normalize(_prices[i].price, _prices[i].source.decimalsOfPrecision, 18);
-        }
-
-        mean = sum/_prices.length;
-
-        for(uint256 i; i < _prices.length; i++) {
-            if(_prices[i].price == mean) // Prevent dividing by zero
-                continue;
-            int256 diff = int256(_prices[i].price - mean);
-            uint256 percent = 10e18 * uint256(_abs(diff)) / ((_prices[i].price + mean) / 2) * 10000 / 10e18;
-            if(percent > tolerablePriceDeviation) {
-                delete _prices[i];
-            }
-        }
-        return _prices;
     }
 
     function _normalize(
